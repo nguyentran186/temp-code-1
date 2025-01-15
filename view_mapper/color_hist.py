@@ -2,73 +2,111 @@ import cv2
 import numpy as np
 import os
 
-def histogram_matching(source, reference):
-    """Adjust the color of the source image to match the histogram of the reference image."""
-    matched = np.zeros_like(source)
-    for i in range(3):  # Assuming images are in RGB format
-        source_hist, bins = np.histogram(source[:, :, i].ravel(), 256, [0, 256])
-        reference_hist, _ = np.histogram(reference[:, :, i].ravel(), 256, [0, 256])
+def calculate_cdf(hist):
+    """Calculate the cumulative distribution function from the histogram."""
+    cdf = hist.cumsum()
+    return cdf / cdf[-1]  # Normalize to [0, 1]
 
-        # Cumulative distribution function (CDF)
-        source_cdf = source_hist.cumsum()
-        source_cdf = source_cdf / source_cdf[-1]  # Normalize
+def histogram_matching(source_image, reference_image, mask=None):
+    """
+    Perform histogram matching of source image to the reference image, 
+    considering only the non-masked region for histogram calculation.
+
+    Parameters:
+    - source_image (ndarray): Source image to be matched.
+    - reference_image (ndarray): Reference image to match the histogram.
+    - mask (ndarray): Binary mask (same size as images), 0 for excluded regions and 255 for included regions.
+
+    Returns:
+    - matched_image (ndarray): Histogram-matched image.
+    """
+    # Convert images to float32
+    source_image = source_image.astype(np.float32)
+    reference_image = reference_image.astype(np.float32)
+
+    # If no mask is provided, consider the entire image
+    if mask is None:
+        mask = np.ones_like(source_image[:, :, 0], dtype=np.uint8) * 255
+
+    # Calculate the histograms and CDFs for each channel
+    hist_size = 256
+    matched_image = source_image.copy()
+    for i in range(3):  # Loop through B, G, R channels
+        # Calculate histograms for the non-masked regions
+        hist_source, _ = np.histogram(
+            source_image[:, :, i][mask > 0], bins=hist_size, range=(0, 256)
+        )
+        hist_reference, _ = np.histogram(
+            reference_image[:, :, i][mask > 0], bins=hist_size, range=(0, 256)
+        )
         
-        reference_cdf = reference_hist.cumsum()
-        reference_cdf = reference_cdf / reference_cdf[-1]  # Normalize
+        # Calculate CDFs
+        cdf_source = calculate_cdf(hist_source)
+        cdf_reference = calculate_cdf(hist_reference)
 
-        # Create a mapping from source to reference
-        mapping = np.interp(source_cdf, reference_cdf, np.arange(256))
+        # Create mapping from source to reference
+        mapping = np.zeros(hist_size, dtype=np.uint8)
+        for j in range(hist_size):
+            mapping[j] = np.searchsorted(cdf_reference, cdf_source[j])
 
-        # Apply mapping to source channel
-        matched[:, :, i] = cv2.LUT(source[:, :, i], mapping.astype(np.uint8))
+        # Apply the mapping to the entire image
+        matched_image[:, :, i] = mapping[source_image[:, :, i].astype(np.uint8)]
 
-    return matched
+    return matched_image.astype(np.uint8)
 
-def process_folder(folder_path, reference_image_path, output_folder):
-    """Adjust the color of all images in a folder to match a reference image."""
-    # Load reference image
-    reference_image = cv2.imread(reference_image_path)
+def process_folder(source_folder, reference_path, output_folder, mask_folder=None):
+    """
+    Perform histogram matching for all images in a folder against a reference image.
+
+    Parameters:
+    - source_folder (str): Path to the folder containing source images.
+    - reference_path (str): Path to the reference image.
+    - output_folder (str): Path to save the output images.
+    - mask_folder (str): Path to the folder containing masks (optional).
+    """
+    # Load the reference image
+    reference_image = cv2.imread(reference_path)
     if reference_image is None:
-        print(f"Error: Unable to load reference image from {reference_image_path}")
+        print(f"Error: Unable to load reference image from {reference_path}")
         return
 
-    # Convert reference image to RGB
-    reference_image = cv2.cvtColor(reference_image, cv2.COLOR_BGR2RGB)
+    # Convert the reference image to RGB
+    reference_image = reference_image.astype(np.float32)
 
     # Create output folder if it doesn't exist
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
+    os.makedirs(output_folder, exist_ok=True)
 
-    # Process each image in the folder
-    for filename in os.listdir(folder_path):
-        input_path = os.path.join(folder_path, filename)
-
-        if not os.path.isfile(input_path):
+    # Process each image in the source folder
+    for filename in os.listdir(source_folder):
+        source_path = os.path.join(source_folder, filename)
+        if not os.path.isfile(source_path):
             continue
 
-        # Read the image
-        source_image = cv2.imread(input_path)
+        # Load source image
+        source_image = cv2.imread(source_path)
         if source_image is None:
             print(f"Skipping {filename}: Unable to read image.")
             continue
 
-        # Convert to RGB
-        source_image = cv2.cvtColor(source_image, cv2.COLOR_BGR2RGB)
+        # Load mask if provided
+        mask = None
+        if mask_folder:
+            mask_path = os.path.join(mask_folder, filename)
+            if os.path.isfile(mask_path):
+                mask = (1 - cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)) * 255
 
-        # Match the histogram
-        matched_image = histogram_matching(source_image, reference_image)
+        # Perform histogram matching
+        matched_image = histogram_matching(source_image, reference_image, mask)
 
-        # Convert back to BGR for saving
-        matched_image = cv2.cvtColor(matched_image, cv2.COLOR_RGB2BGR)
-
-        # Save the adjusted image
+        # Save the matched image
         output_path = os.path.join(output_folder, filename)
         cv2.imwrite(output_path, matched_image)
         print(f"Processed and saved: {output_path}")
 
 # Example usage
 process_folder(
-    folder_path='/home/nguyen/.code/statue_infusion/input_images', 
-    reference_image_path='/home/nguyen/.code/statue_infusion/reference.jpg', 
-    output_folder='/home/nguyen/.code/statue_infusion/output_images'
+    source_folder='/home/nguyen/code/2D23D/temp-code/output_inpainted/10',
+    reference_path='/home/nguyen/code/2D23D/SPIn-NeRF/spinnerf-dataset/10/images_4/20220823_095135.png',
+    output_folder='output_folder',
+    mask_folder='/home/nguyen/code/2D23D/SPIn-NeRF/spinnerf-dataset/10/images_4/label'
 )
